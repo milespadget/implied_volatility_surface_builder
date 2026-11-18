@@ -13,7 +13,10 @@ from ivsurface.time import year_fraction
 @dataclass(frozen=True)
 class PipelineResult:
     points: pd.DataFrame
-    """One row per input quote: strike, expiry, option_type, k = ln(K/F), T, w = iv^2 T, iv."""
+    """One row per input quote: strike, expiry, option_type, k = ln(K/F), T, w = iv^2 T, iv, reason.
+
+    Quotes that could not be inverted keep their row, with NaN iv/w and a non-"ok" reason.
+    """
 
 
 def build(snapshot: pd.DataFrame) -> PipelineResult:
@@ -24,14 +27,13 @@ def build(snapshot: pd.DataFrame) -> PipelineResult:
     )
     mid = 0.5 * (snapshot["bid"].to_numpy(dtype=float) + snapshot["ask"].to_numpy(dtype=float))
     premium = to_forward_dollars(mid, forward)
-    iv = np.array(
-        [
-            black76.implied_vol(prem, fwd, strk, years, option_type)
-            for prem, fwd, strk, years, option_type in zip(
-                premium, forward, strike, t, snapshot["option_type"], strict=True
-            )
-        ]
-    )
+    solved = [
+        black76.implied_vol(prem, fwd, strk, years, option_type)
+        for prem, fwd, strk, years, option_type in zip(
+            premium, forward, strike, t, snapshot["option_type"], strict=True
+        )
+    ]
+    iv = np.array([r.iv for r in solved])
     points = pd.DataFrame(
         {
             "strike": strike,
@@ -41,6 +43,7 @@ def build(snapshot: pd.DataFrame) -> PipelineResult:
             "T": t,
             "w": iv**2 * t,
             "iv": iv,
+            "reason": [str(r.reason) for r in solved],
         }
     )
     return PipelineResult(points=points)
