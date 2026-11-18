@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from ivsurface import black76
+from ivsurface import black76, chain
 from ivsurface.snapshot import to_forward_dollars
 from ivsurface.time import year_fraction
 
@@ -13,37 +13,41 @@ from ivsurface.time import year_fraction
 @dataclass(frozen=True)
 class PipelineResult:
     points: pd.DataFrame
-    """One row per input quote: strike, expiry, option_type, k = ln(K/F), T, w = iv^2 T, iv, reason.
+    """One row per input quote: strike, expiry, option_type, k = ln(K/F), T, w = iv^2 T, iv,
+    relative_spread = (ask - bid) / mid, reason.
 
     Quotes that could not be inverted keep their row, with NaN iv/w and a non-"ok" reason.
     """
 
 
-def build(snapshot: pd.DataFrame) -> PipelineResult:
+def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfig()) -> PipelineResult:
     forward = snapshot["underlying_price"].to_numpy(dtype=float)
     strike = snapshot["strike"].to_numpy(dtype=float)
     t = np.array(
         [year_fraction(s, e) for s, e in zip(snapshot["snapshot_time"], snapshot["expiry"], strict=True)]
     )
-    mid = 0.5 * (snapshot["bid"].to_numpy(dtype=float) + snapshot["ask"].to_numpy(dtype=float))
+    bid = snapshot["bid"].to_numpy(dtype=float)
+    ask = snapshot["ask"].to_numpy(dtype=float)
+    mid = 0.5 * (bid + ask)
     premium = to_forward_dollars(mid, forward)
-    solved = [
-        black76.implied_vol(prem, fwd, strk, years, option_type)
-        for prem, fwd, strk, years, option_type in zip(
-            premium, forward, strike, t, snapshot["option_type"], strict=True
-        )
-    ]
-    iv = np.array([r.iv for r in solved])
+    option_type = snapshot["option_type"].to_list()
+    reason = chain.screen(snapshot, t, config)
+    iv = np.full(len(snapshot), np.nan)
+    for i, rejected in enumerate(reason):
+        if rejected is None:
+            solved = black76.implied_vol(premium[i], forward[i], strike[i], t[i], option_type[i])
+            iv[i], reason[i] = solved.iv, str(solved.reason)
     points = pd.DataFrame(
         {
             "strike": strike,
             "expiry": snapshot["expiry"].to_numpy(),
-            "option_type": snapshot["option_type"].to_numpy(),
+            "option_type": option_type,
             "k": np.log(strike / forward),
             "T": t,
             "w": iv**2 * t,
             "iv": iv,
-            "reason": [str(r.reason) for r in solved],
+            "relative_spread": chain.relative_spread(bid, ask),
+            "reason": reason,
         }
     )
     return PipelineResult(points=points)
