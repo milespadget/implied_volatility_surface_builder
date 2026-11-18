@@ -8,7 +8,7 @@ import pytest
 
 from ivsurface.chain import FilterConfig
 from ivsurface.pipeline import build
-from ivsurface.synthetic import flat_vol_chain
+from ivsurface.synthetic import option_chain
 
 SNAPSHOT_TIME = datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
 EXPIRY = datetime(2026, 1, 31, 8, 0, tzinfo=UTC)  # exactly 30 calendar days later
@@ -18,9 +18,9 @@ STRIKES = [40_000.0, 45_000.0, 50_000.0, 55_000.0, 60_000.0]
 
 def chain(**overrides: Any) -> pd.DataFrame:
     kwargs: dict[str, Any] = dict(
-        forward=FORWARD, vol=0.55, strikes=STRIKES, expiry=EXPIRY, snapshot_time=SNAPSHOT_TIME
+        forward=FORWARD, vol=0.55, strikes=STRIKES, expiries=[EXPIRY], snapshot_time=SNAPSHOT_TIME
     )
-    return flat_vol_chain(**(kwargs | overrides))
+    return option_chain(**(kwargs | overrides))
 
 
 def ok(points: pd.DataFrame) -> pd.DataFrame:
@@ -134,7 +134,9 @@ def test_wide_spread_quotes_are_rejected_at_the_configured_threshold():
 
 def test_short_expiries_are_rejected_at_the_configured_threshold():
     one_day = datetime(2026, 1, 2, 8, 0, tzinfo=UTC)
-    snapshot = chain(expiry=one_day)
-    assert set(build(snapshot).points["reason"]) == {"short_expiry"}  # default minimum is 2 days
+    snapshot = chain(expiries=[one_day])
+    rejected = build(snapshot)
+    assert set(rejected.points["reason"]) == {"short_expiry"}  # default minimum is 2 days
+    assert rejected.interpolated is None  # nothing left to build a surface from
     relaxed = build(snapshot, FilterConfig(min_days_to_expiry=0.5)).points
     assert len(ok(relaxed)) == len(STRIKES)

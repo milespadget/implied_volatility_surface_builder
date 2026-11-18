@@ -7,6 +7,7 @@ import pandas as pd
 
 from ivsurface import black76, chain
 from ivsurface.snapshot import to_forward_dollars
+from ivsurface.surface import InterpolatedSurface
 from ivsurface.time import year_fraction
 
 
@@ -18,6 +19,8 @@ class PipelineResult:
 
     Quotes that could not be inverted keep their row, with NaN iv/w and a non-"ok" reason.
     """
+    interpolated: InterpolatedSurface | None
+    """The baseline surface through the "ok" points, or None if too few quotes survived."""
 
 
 def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfig()) -> PipelineResult:
@@ -50,4 +53,9 @@ def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfi
             "reason": reason,
         }
     )
-    return PipelineResult(points=points)
+    usable = points.query("reason == 'ok'")
+    try:
+        interpolated = InterpolatedSurface(usable)
+    except ValueError:
+        interpolated = None
+    return PipelineResult(points=points, interpolated=interpolated)
