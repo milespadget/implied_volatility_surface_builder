@@ -1,11 +1,11 @@
-"""The single entry point: a snapshot in, implied-vol points (and later, surfaces) out."""
+"""The single entry point: a snapshot in; implied-vol points, surfaces and arbitrage reports out."""
 
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
-from ivsurface import black76, chain
+from ivsurface import arbitrage, black76, chain
 from ivsurface.reasons import Reason
 from ivsurface.snapshot import to_forward_dollars
 from ivsurface.surface import InterpolatedSurface
@@ -22,6 +22,8 @@ class PipelineResult:
     """
     interpolated: InterpolatedSurface | None
     """The baseline surface through the "ok" points, or None if too few quotes survived."""
+    interpolated_arbitrage: arbitrage.ArbitrageReport | None
+    """Butterfly and calendar violations in ``interpolated`` (None when there is no surface)."""
 
 
 def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfig()) -> PipelineResult:
@@ -58,5 +60,18 @@ def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfi
     try:
         interpolated = InterpolatedSurface(usable)
     except ValueError:
-        interpolated = None
-    return PipelineResult(points=points, interpolated=interpolated)
+        return PipelineResult(points=points, interpolated=None, interpolated_arbitrage=None)
+    return PipelineResult(
+        points=points,
+        interpolated=interpolated,
+        interpolated_arbitrage=arbitrage.check(interpolated, _quoted_k_ranges(usable, interpolated.expiries)),
+    )
+
+
+def _quoted_k_ranges(usable: pd.DataFrame, expiries: np.ndarray) -> list[tuple[float, float]]:
+    """For each expiry, the (k_min, k_max) spanned by its usable quotes."""
+    ranges = []
+    for t in expiries:
+        k = usable.loc[usable["T"] == t, "k"].to_numpy(dtype=float)
+        ranges.append((float(k.min()), float(k.max())))
+    return ranges

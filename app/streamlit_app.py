@@ -6,6 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
+from ivsurface.arbitrage import ViolationKind
 from ivsurface.chain import FilterConfig
 from ivsurface.pipeline import build
 from ivsurface.synthetic import option_chain
@@ -70,8 +71,11 @@ result = build(chain, config)
 points = result.points
 used = points.query("reason == 'ok'")
 surface = result.interpolated
+arbitrage = result.interpolated_arbitrage
 
-smiles_tab, surface_tab, term_tab = st.tabs(["Smiles by expiry", "3D surface", "ATM term structure"])
+smiles_tab, surface_tab, term_tab, arbitrage_tab = st.tabs(
+    ["Smiles by expiry", "3D surface", "ATM term structure", "Arbitrage"]
+)
 
 with smiles_tab:
     fig = go.Figure()
@@ -88,7 +92,7 @@ with smiles_tab:
                 )
             )
     fig.update_layout(xaxis_title="log-moneyness k = ln(K/F)", yaxis_title="implied vol σ", yaxis_tickformat=".0%")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 if surface is None:
     st.warning("Too few quotes survived the filters to build a surface.")
@@ -106,7 +110,7 @@ else:
             scene={"xaxis_title": "k = ln(K/F)", "yaxis_title": "days to expiry", "zaxis_title": "σ", "zaxis_tickformat": ".0%"},
             height=650,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with term_tab:
         fig = go.Figure(go.Scatter(x=t_grid * 365, y=surface.iv(np.zeros_like(t_grid), t_grid), mode="lines", name="interpolated"))
@@ -114,7 +118,34 @@ else:
             go.Scatter(x=t_grid * 365, y=[true_vol(0.0, t) for t in t_grid], mode="lines", line={"dash": "dot"}, name="true")
         )
         fig.update_layout(xaxis_title="days to expiry", yaxis_title="ATM implied vol σ(k=0)", yaxis_tickformat=".0%")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
+
+    with arbitrage_tab:
+        assert arbitrage is not None  # there is a surface, so it was checked
+        violations = arbitrage.violations
+        left, right = st.columns(2)
+        for column, kind in ((left, ViolationKind.BUTTERFLY), (right, ViolationKind.CALENDAR)):
+            column.metric(
+                f"{kind.capitalize()} violations",
+                arbitrage.count(kind),
+                f"{arbitrage.share(kind):.0%} of points checked",
+                delta_color="off",
+            )
+        st.caption(
+            "Butterfly: Durrleman's g(k) < 0 on a slice means the smile implies a negative density. "
+            "Calendar: total variance w = σ²T falling as expiry lengthens at fixed k. "
+            "Counts are grid points in violation, over each slice's quoted k range."
+        )
+
+        fig = go.Figure()
+        for curve in arbitrage.butterfly_curves:
+            fig.add_trace(go.Scatter(x=curve.k, y=curve.g, mode="lines", name=f"{round(curve.t * 365)}d"))
+        fig.add_hline(y=0, line_color="red", annotation_text="g = 0")
+        fig.update_layout(xaxis_title="log-moneyness k = ln(K/F)", yaxis_title="Durrleman g(k)")
+        st.plotly_chart(fig, width="stretch")
+
+        worst = violations.sort_values("magnitude", ascending=False).head(20).assign(days=lambda v: v["T"] * 365)
+        st.dataframe(worst[["kind", "k", "days", "magnitude"]], hide_index=True)
 
 st.subheader("Quotes")
 st.write(f"{len(used)} of {len(points)} quotes inverted. The rest were rejected:")
