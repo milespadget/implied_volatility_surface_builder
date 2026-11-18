@@ -14,6 +14,7 @@ from typing import NamedTuple
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from numpy.typing import NDArray
 import streamlit as st
 
 from ivsurface.arbitrage import ArbitrageReport, ViolationKind
@@ -181,8 +182,18 @@ else:
     t_grid = np.linspace(all_expiries.min(), all_expiries.max(), 60)
     kk, tt = np.meshgrid(k_grid, t_grid)
 
+    def quoted_region(surface: Surface) -> NDArray[np.bool_]:
+        """True where (k, T) lies inside the quoted strikes: each expiry's quoted k range, linearly
+        interpolated between expiries. Short expiries are only listed near the money, so outside this
+        region a surface is extrapolating steep short-dated wings into corners with no data."""
+        quoted = used.groupby("T")["k"].agg(["min", "max"]).loc[surface.expiries]
+        k_min = np.interp(tt, surface.expiries, quoted["min"].to_numpy())
+        k_max = np.interp(tt, surface.expiries, quoted["max"].to_numpy())
+        return (kk >= k_min) & (kk <= k_max)
+
     with surface_tab:
-        fig = go.Figure(go.Surface(x=kk, y=tt * 365, z=main.surface.iv(kk, tt), colorscale="Viridis", colorbar={"title": "σ"}))
+        z = np.where(quoted_region(main.surface), main.surface.iv(kk, tt), np.nan)
+        fig = go.Figure(go.Surface(x=kk, y=tt * 365, z=z, colorscale="Viridis", colorbar={"title": "σ"}))
         fig.add_trace(
             go.Scatter3d(x=used["k"], y=used["T"] * 365, z=used["iv"], mode="markers", marker={"size": 2, "color": "black"}, name="quotes")
         )
@@ -191,7 +202,10 @@ else:
             height=650,
         )
         st.plotly_chart(fig, width="stretch")
-        st.caption(f"The {main.label} surface, with the quotes it was built from.")
+        st.caption(
+            f"The {main.label} surface, with the quotes it was built from, drawn only over the quoted strikes "
+            "at each expiry. Beyond them the surface would be extrapolating."
+        )
 
     with term_tab:
         fig = go.Figure()
