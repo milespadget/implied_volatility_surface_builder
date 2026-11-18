@@ -16,7 +16,7 @@ from ivsurface.time import year_fraction
 class PipelineResult:
     points: pd.DataFrame
     """One row per input quote: strike, expiry, option_type, k = ln(K/F), T, w = iv^2 T, iv,
-    relative_spread = (ask - bid) / mid, reason.
+    relative_spread = (ask - bid) / mid, mark_iv (carried through from the snapshot), reason.
 
     Quotes that could not be inverted keep their row, with NaN iv/w and a non-"ok" reason.
     """
@@ -53,6 +53,7 @@ def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfi
             "w": iv**2 * t,
             "iv": iv,
             "relative_spread": chain.relative_spread(bid, ask),
+            "mark_iv": snapshot["mark_iv"].to_numpy(dtype=float),
             "reason": [str(r) for r in reasons],
         }
     )
