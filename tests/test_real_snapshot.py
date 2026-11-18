@@ -47,3 +47,29 @@ def test_quotes_with_an_empty_bid_side_are_rejected_as_zero_bid(snapshot, result
     reasons = set(result.points["reason"].to_numpy()[no_bid])
     assert reasons <= {"zero_bid", "short_expiry", "itm", "atm_duplicate"}  # earlier checks may win
     assert "zero_bid" in reasons
+
+
+def test_svi_fits_every_expiry_with_a_valid_smile(result):
+    params = result.svi_params
+    assert result.interpolated is not None
+    np.testing.assert_allclose(params["T"], result.interpolated.expiries)  # every expiry is fitted
+    assert np.all(params["b"].to_numpy() >= 0)
+    assert np.all(np.abs(params["rho"].to_numpy()) < 1)
+    assert np.all(params["sigma"].to_numpy() > 0)
+    assert np.all(params["min_variance"].to_numpy() >= 0)
+
+
+def test_svi_fits_the_real_quotes_closely(result):
+    ok = result.points.query("reason == 'ok'")
+    assert result.svi is not None
+    misfit = np.abs(ok["iv"].to_numpy() - result.svi.iv(ok["k"].to_numpy(), ok["T"].to_numpy()))
+    assert np.median(misfit) < 0.002
+    assert misfit.max() < 0.03
+
+
+def test_svi_has_no_more_arbitrage_than_the_interpolated_surface(result):
+    interpolated, svi = result.interpolated_arbitrage, result.svi_arbitrage
+    assert interpolated is not None and svi is not None
+    for kind in ViolationKind:
+        assert svi.count(kind) <= interpolated.count(kind)
+    assert interpolated.count(ViolationKind.BUTTERFLY) > 0  # so the comparison means something

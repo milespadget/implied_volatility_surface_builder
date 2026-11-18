@@ -5,10 +5,10 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from ivsurface import arbitrage, black76, chain
+from ivsurface import arbitrage, black76, chain, svi
 from ivsurface.reasons import Reason
 from ivsurface.snapshot import to_forward_dollars
-from ivsurface.surface import InterpolatedSurface
+from ivsurface.surface import InterpolatedSurface, Surface, SVISurface
 from ivsurface.time import year_fraction
 
 
@@ -24,6 +24,12 @@ class PipelineResult:
     """The baseline surface through the "ok" points, or None if too few quotes survived."""
     interpolated_arbitrage: arbitrage.ArbitrageReport | None
     """Butterfly and calendar violations in ``interpolated`` (None when there is no surface)."""
+    svi_params: pd.DataFrame
+    """One row per expiry with enough quotes for an SVI fit: T, a, b, rho, m, sigma, min_variance."""
+    svi: SVISurface | None
+    """The SVI surface built from ``svi_params``, or None if no expiry could be fitted."""
+    svi_arbitrage: arbitrage.ArbitrageReport | None
+    """Butterfly and calendar violations in ``svi``, over the same quoted k ranges."""
 
 
 def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfig()) -> PipelineResult:
@@ -58,15 +64,46 @@ def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfi
         }
     )
     usable = points.loc[points["reason"] == Reason.OK]
+
     try:
         interpolated = InterpolatedSurface(usable)
     except ValueError:
-        return PipelineResult(points=points, interpolated=None, interpolated_arbitrage=None)
+        interpolated = None
+
+    svi_slices = _fit_svi_slices(usable)
+    svi_surface = SVISurface(svi_slices) if svi_slices else None
+    svi_params = pd.DataFrame(
+        [{"T": t, **p._asdict(), "min_variance": p.min_variance} for t, p in svi_slices],
+        columns=["T", *svi.SVIParams._fields, "min_variance"],
+    )
+
     return PipelineResult(
         points=points,
         interpolated=interpolated,
-        interpolated_arbitrage=arbitrage.check(interpolated, _quoted_k_ranges(usable, interpolated.expiries)),
+        interpolated_arbitrage=_check(interpolated, usable),
+        svi_params=svi_params,
+        svi=svi_surface,
+        svi_arbitrage=_check(svi_surface, usable),
     )
+
+
+def _check(surface: Surface | None, usable: pd.DataFrame) -> arbitrage.ArbitrageReport | None:
+    """Arbitrage-check a surface over each of its expiries' quoted k ranges."""
+    return None if surface is None else arbitrage.check(surface, _quoted_k_ranges(usable, surface.expiries))
+
+
+SVI_MIN_QUOTES = 5
+"""An SVI slice has five parameters, so an expiry needs at least five usable quotes."""
+
+
+def _fit_svi_slices(usable: pd.DataFrame) -> list[tuple[float, svi.SVIParams]]:
+    """An SVI fit for every expiry with at least SVI_MIN_QUOTES usable quotes."""
+    slices = []
+    for t in np.unique(usable["T"].to_numpy(dtype=float)):
+        slice_points = usable.loc[usable["T"] == t]
+        if len(slice_points) >= SVI_MIN_QUOTES:
+            slices.append((float(t), svi.fit_slice(slice_points["k"], slice_points["w"], slice_points["relative_spread"])))
+    return slices
 
 
 def _quoted_k_ranges(usable: pd.DataFrame, expiries: np.ndarray) -> list[tuple[float, float]]:

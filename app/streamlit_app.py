@@ -8,16 +8,19 @@ import os
 import urllib.error
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from collections.abc import Mapping
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from ivsurface.arbitrage import ViolationKind
+from ivsurface.arbitrage import ArbitrageReport, ViolationKind
 from ivsurface.chain import FilterConfig
 from ivsurface.data import fetch_snapshot, list_snapshots, load_snapshot, save_snapshot
-from ivsurface.pipeline import build
+from ivsurface.pipeline import PipelineResult, build
+from ivsurface.surface import Surface
 from ivsurface.synthetic import VolFunction, option_chain
 
 SYNTHETIC = "Synthetic surface"
@@ -109,11 +112,32 @@ else:
         "comes from its own mark price, so expect small gaps between the two, mostly where spreads are wide."
     )
 
-result = build(snapshot, config)
+@st.cache_resource(max_entries=16, show_spinner="Inverting quotes and fitting SVI slices…")
+def build_cached(snapshot: pd.DataFrame, config: FilterConfig) -> PipelineResult:
+    """The pipeline is deterministic, so a slider change only refits when its inputs change."""
+    return build(snapshot, config)
+
+
+class SurfaceView(NamedTuple):
+    """One surface the pipeline built, with how the app draws it."""
+
+    label: str
+    surface: Surface
+    report: ArbitrageReport
+    line: Mapping[str, object]
+
+
+result = build_cached(snapshot, config)
 points = result.points
 used = points.query("reason == 'ok'")
-surface = result.interpolated
-arbitrage = result.interpolated_arbitrage
+views = [
+    SurfaceView(label, surface, report, line)
+    for label, surface, report, line in (
+        ("SVI", result.svi, result.svi_arbitrage, {"width": 2, "dash": "dash"}),
+        ("Interpolated", result.interpolated, result.interpolated_arbitrage, {"width": 1}),
+    )
+    if surface is not None and report is not None
+]
 
 smiles_tab, surface_tab, term_tab, arbitrage_tab = st.tabs(
     ["Smiles by expiry", "3D surface", "ATM term structure", "Arbitrage"]
@@ -131,28 +155,34 @@ with smiles_tab:
                 showlegend=False, marker={"symbol": "circle-open", "color": "grey"},
             )
         )
-        if surface is not None and len(ok) >= 2:
-            k = np.linspace(ok["k"].min(), ok["k"].max(), 200)
-            fig.add_trace(
-                go.Scatter(
-                    x=k, y=surface.iv(k, np.full_like(k, t)), mode="lines", name=f"{name} interpolated",
-                    legendgroup=name, showlegend=False, line={"width": 1},
+        k = np.linspace(ok["k"].min(), ok["k"].max(), 200)
+        for view in views:
+            if t in view.surface.expiries:
+                fig.add_trace(
+                    go.Scatter(
+                        x=k, y=view.surface.iv(k, np.full_like(k, t)), mode="lines", name=f"{name} {view.label}",
+                        legendgroup=name, showlegend=False, line=view.line,
+                    )
                 )
-            )
     fig.update_layout(xaxis_title="log-moneyness k = ln(K/F)", yaxis_title="implied vol σ", yaxis_tickformat=".0%")
     st.plotly_chart(fig, width="stretch")
-    st.caption("Filled markers: our IV at the mid. Open grey markers: Deribit's mark IV. Lines: the interpolated surface.")
+    st.caption(
+        "Filled markers: our IV at the mid. Open grey markers: Deribit's mark IV. "
+        "Dashed lines: the SVI fit. Thin lines: the interpolated surface."
+    )
 
-if surface is None:
+if not views:
     st.warning("Too few quotes survived the filters to build a surface.")
 else:
+    main = views[0]  # SVI when it could be fitted, otherwise the interpolated surface
     k_lo, k_hi = np.quantile(used["k"], [0.02, 0.98])
     k_grid = np.linspace(k_lo, k_hi, 61)
-    t_grid = np.linspace(surface.expiries[0], surface.expiries[-1], 60)
+    all_expiries = np.concatenate([v.surface.expiries for v in views])
+    t_grid = np.linspace(all_expiries.min(), all_expiries.max(), 60)
     kk, tt = np.meshgrid(k_grid, t_grid)
 
     with surface_tab:
-        fig = go.Figure(go.Surface(x=kk, y=tt * 365, z=surface.iv(kk, tt), colorscale="Viridis", colorbar={"title": "σ"}))
+        fig = go.Figure(go.Surface(x=kk, y=tt * 365, z=main.surface.iv(kk, tt), colorscale="Viridis", colorbar={"title": "σ"}))
         fig.add_trace(
             go.Scatter3d(x=used["k"], y=used["T"] * 365, z=used["iv"], mode="markers", marker={"size": 2, "color": "black"}, name="quotes")
         )
@@ -161,9 +191,14 @@ else:
             height=650,
         )
         st.plotly_chart(fig, width="stretch")
+        st.caption(f"The {main.label} surface, with the quotes it was built from.")
 
     with term_tab:
-        fig = go.Figure(go.Scatter(x=t_grid * 365, y=surface.iv(np.zeros_like(t_grid), t_grid), mode="lines", name="interpolated"))
+        fig = go.Figure()
+        for view in views:
+            fig.add_trace(
+                go.Scatter(x=t_grid * 365, y=view.surface.iv(np.zeros_like(t_grid), t_grid), mode="lines", name=view.label, line=view.line)
+            )
         if true_vol is not None:
             fig.add_trace(
                 go.Scatter(x=t_grid * 365, y=[true_vol(0.0, t) for t in t_grid], mode="lines", line={"dash": "dot"}, name="true")
@@ -172,30 +207,35 @@ else:
         st.plotly_chart(fig, width="stretch")
 
     with arbitrage_tab:
-        assert arbitrage is not None  # there is a surface, so it was checked
-        left, right = st.columns(2)
-        for column, kind in ((left, ViolationKind.BUTTERFLY), (right, ViolationKind.CALENDAR)):
-            column.metric(
-                f"{kind.capitalize()} violations",
-                arbitrage.count(kind),
-                f"{arbitrage.share(kind):.0%} of points checked",
-                delta_color="off",
-            )
+        columns = iter(st.columns(2 * len(views)))
+        for view in sorted(views, key=lambda v: v.label):  # Interpolated first: the baseline, then SVI
+            for kind in (ViolationKind.BUTTERFLY, ViolationKind.CALENDAR):
+                next(columns).metric(
+                    f"{view.label}: {kind}", view.report.count(kind),
+                    f"{view.report.share(kind):.0%} of points checked", delta_color="off",
+                )
         st.caption(
             "Butterfly: Durrleman's g(k) < 0 on a slice means the smile implies a negative density. "
             "Calendar: total variance w = σ²T falling as expiry lengthens at fixed k. "
-            "Counts are grid points in violation, over each slice's quoted k range."
+            "Counts are grid points in violation over each expiry's quoted k range. SVI needs at least "
+            "five quotes per expiry, so it may cover fewer expiries than the interpolated surface."
         )
 
+        by_label = {v.label: v for v in views}
+        inspect = st.radio("Inspect", list(by_label), horizontal=True, key="inspect")
+        report = by_label[inspect].report
         fig = go.Figure()
-        for curve in arbitrage.butterfly_curves:
+        for curve in report.butterfly_curves:
             fig.add_trace(go.Scatter(x=curve.k, y=curve.g, mode="lines", name=f"{curve.t * 365:.1f}d"))
         fig.add_hline(y=0, line_color="red", annotation_text="g = 0")
-        fig.update_layout(xaxis_title="log-moneyness k = ln(K/F)", yaxis_title="Durrleman g(k)")
+        fig.update_layout(xaxis_title="log-moneyness k = ln(K/F)", yaxis_title=f"Durrleman g(k), {inspect}")
         st.plotly_chart(fig, width="stretch")
 
-        worst = arbitrage.violations.sort_values("magnitude", ascending=False).head(20).assign(days=lambda v: v["T"] * 365)
+        worst = report.violations.sort_values("magnitude", ascending=False).head(20).assign(days=lambda v: v["T"] * 365)
         st.dataframe(worst[["kind", "k", "days", "magnitude"]], hide_index=True)
+
+    st.subheader("SVI slices")
+    st.dataframe(result.svi_params.assign(days=lambda p: p["T"] * 365).drop(columns="T"), hide_index=True)
 
 st.subheader("Quotes")
 st.write(f"{len(used)} of {len(points)} quotes inverted. The rest were rejected:")
