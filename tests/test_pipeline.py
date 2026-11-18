@@ -53,9 +53,10 @@ def test_only_otm_quotes_are_inverted(result):
         (55_000.0, "call"),
         (60_000.0, "call"),
     ]
-    itm = result.points.query("reason != 'ok'")
-    assert set(itm["reason"]) == {"itm"}
-    assert np.isnan(np.asarray(itm["iv"], dtype=float)).all()
+    unused = result.points.query("reason != 'ok'")
+    assert np.isnan(np.asarray(unused["iv"], dtype=float)).all()
+    assert quote(result.points, 50_000.0, "put")["reason"] == "atm_duplicate"
+    assert set(unused.query("strike != 50_000.0")["reason"]) == {"itm"}
 
 
 def test_points_recover_the_known_vol(result):
@@ -128,7 +129,7 @@ def test_wide_spread_quotes_are_rejected_at_the_configured_threshold():
     snapshot = chain(relative_spread=0.2)
     assert set(ok(build(snapshot, FilterConfig(max_relative_spread=0.25)).points)["strike"]) == set(STRIKES)
     tight = build(snapshot, FilterConfig(max_relative_spread=0.15)).points
-    otm = tight.query("reason != 'itm'")
+    otm = tight.query("reason not in ['itm', 'atm_duplicate']")
     assert set(otm["reason"]) == {"wide_spread"}
 
 

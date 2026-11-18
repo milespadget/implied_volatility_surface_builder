@@ -57,3 +57,24 @@ def test_vol_is_flat_beyond_the_quoted_expiries(surface):
     first, last = EXPIRY_DAYS[0] / 365, EXPIRY_DAYS[-1] / 365
     np.testing.assert_allclose(interpolated.iv(k, np.full(2, 1 / 365)), interpolated.iv(k, np.full(2, first)), rtol=1e-12)
     np.testing.assert_allclose(interpolated.iv(k, np.full(2, 2.0)), interpolated.iv(k, np.full(2, last)), rtol=1e-12)
+
+
+def test_surface_tracks_a_term_structure_between_expiries():
+    # ATM vol decays from ~0.7 to ~0.45 over the first few months; w is no longer linear in T,
+    # so this exercises the across-T interpolation rather than the strike splines.
+    def term_smile(k, t):
+        return 0.45 + 0.25 * np.exp(-t / 0.1) - 0.1 * k + 0.3 * k**2
+
+    snapshot = option_chain(
+        forward=FORWARD,
+        vol=term_smile,
+        strikes=STRIKES,
+        expiries=[SNAPSHOT_TIME + timedelta(days=d) for d in [7, 14, 30, 60, 90, 180]],
+        snapshot_time=SNAPSHOT_TIME,
+        relative_spread=0.05,
+    )
+    interpolated = build(snapshot).interpolated
+    assert interpolated is not None
+    k = np.array([-0.43, -0.11, 0.0, 0.07, 0.29, 0.51])
+    t = np.array([10, 20, 45, 75, 120, 170]) / 365
+    np.testing.assert_allclose(interpolated.iv(k, t), term_smile(k, t), atol=0.01)

@@ -4,11 +4,11 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Deep OTM, very short expiry and tiny-vega cases converge, via the Brent fallback (Black-76 seam tests).
-- [ ] A price below intrinsic gives NaN with a "below intrinsic" reason.
-- [ ] A price above the upper bound gives NaN with an "above upper bound" reason.
-- [ ] Non-convergence gives NaN with a "no convergence" reason.
-- [ ] Successfully inverted quotes have a reason code of "ok".
-- [ ] The pipeline's points table includes the reason code for every input quote.
+- [x] Deep OTM, very short expiry and tiny-vega cases converge, via the Brent fallback (Black-76 seam tests).
+- [x] A price below intrinsic gives NaN with a "below intrinsic" reason.
+- [x] A price above the upper bound gives NaN with an "above upper bound" reason.
+- [x] Non-convergence gives NaN with a "no convergence" reason.
+- [x] Successfully inverted quotes have a reason code of "ok".
+- [x] The pipeline's points table includes the reason code for every input quote.

@@ -4,11 +4,11 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] The synthetic generator supports multiple expiries.
-- [ ] The `Surface` interface defines `iv(k, T)` and `total_variance(k, T)`, both accepting arrays.
-- [ ] `InterpolatedSurface` reproduces the input points within tolerance, and gives sensible values between them.
-- [ ] The pipeline result includes the interpolated surface.
-- [ ] A pipeline test on a multi-expiry synthetic chain recovers the known IVs at off-grid (k, T) points within tolerance.
-- [ ] The app shows a 3D σ(k, T) plot and an ATM term-structure chart.
+- [x] The synthetic generator supports multiple expiries.
+- [x] The `Surface` interface defines `iv(k, T)` and `total_variance(k, T)`, both accepting arrays.
+- [x] `InterpolatedSurface` reproduces the input points within tolerance, and gives sensible values between them.
+- [x] The pipeline result includes the interpolated surface.
+- [x] A pipeline test on a multi-expiry synthetic chain recovers the known IVs at off-grid (k, T) points within tolerance.
+- [x] The app shows a 3D σ(k, T) plot and an ATM term-structure chart.

@@ -2,7 +2,8 @@ import math
 
 import pytest
 
-from ivsurface.black76 import Reason, implied_vol, price, vega
+from ivsurface.black76 import implied_vol, price, vega
+from ivsurface.reasons import Reason
 
 
 def test_atm_call_matches_known_value():

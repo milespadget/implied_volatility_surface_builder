@@ -2,11 +2,12 @@
 
 import math
 from collections.abc import Callable
-from enum import StrEnum
 from typing import Literal, NamedTuple
 
 import numpy as np
 from scipy.optimize import brentq
+
+from ivsurface.reasons import Reason
 
 OptionType = Literal["call", "put"]
 
@@ -15,15 +16,6 @@ _EPS = np.finfo(np.float64).eps
 SIGMA_MIN = 1e-8
 SIGMA_MAX = 20.0
 """The search range for implied vol. Anything outside it is reported as no convergence."""
-
-
-class Reason(StrEnum):
-    """Why an implied vol was (or was not) produced for a quote."""
-
-    OK = "ok"
-    BELOW_INTRINSIC = "below_intrinsic"
-    ABOVE_UPPER_BOUND = "above_upper_bound"
-    NO_CONVERGENCE = "no_convergence"
 
 
 class IVResult(NamedTuple):
@@ -86,7 +78,7 @@ def implied_vol(
     if not premium < upper:
         return IVResult(math.nan, Reason.ABOVE_UPPER_BOUND)
 
-    def excess(sigma: float) -> float:
+    def price_error(sigma: float) -> float:
         return price(forward, strike, t, sigma, option_type) - premium
 
     # Price is increasing in sigma, so [lo, hi] always brackets the root and every Newton
@@ -96,7 +88,7 @@ def implied_vol(
     # converges monotonically. ATM it is 0, so floor it at a small positive vol.
     sigma = min(max(math.sqrt(2.0 * abs(math.log(forward / strike)) / t), 1e-3), SIGMA_MAX)
     for _ in range(max_iter):
-        diff = excess(sigma)
+        diff = price_error(sigma)
         if diff > 0.0:
             hi = sigma
         else:
@@ -112,14 +104,14 @@ def implied_vol(
             return IVResult(sigma, Reason.OK)
         if not lo < sigma < hi:
             break  # Newton escaped the bracket
-    return _brent_fallback(excess, lo, hi, tol)
+    return _brent_fallback(price_error, lo, hi, tol)
 
 
-def _brent_fallback(excess: Callable[[float], float], lo: float, hi: float, tol: float) -> IVResult:
+def _brent_fallback(price_error: Callable[[float], float], lo: float, hi: float, tol: float) -> IVResult:
     """Slow but sure: Brent's method on whatever bracket Newton left behind."""
-    if not (excess(lo) < 0.0 < excess(hi)):
+    if not (price_error(lo) < 0.0 < price_error(hi)):
         return IVResult(math.nan, Reason.NO_CONVERGENCE)
-    sigma, info = brentq(excess, lo, hi, xtol=tol * 1e-2, rtol=np.float64(4 * _EPS), full_output=True)
+    sigma, info = brentq(price_error, lo, hi, xtol=tol * 1e-2, rtol=np.float64(4 * _EPS), full_output=True)
     if not info.converged:
         return IVResult(math.nan, Reason.NO_CONVERGENCE)
     return IVResult(float(sigma), Reason.OK)

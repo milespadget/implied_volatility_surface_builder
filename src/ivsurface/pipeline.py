@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ivsurface import black76, chain
+from ivsurface.reasons import Reason
 from ivsurface.snapshot import to_forward_dollars
 from ivsurface.surface import InterpolatedSurface
 from ivsurface.time import year_fraction
@@ -34,12 +35,12 @@ def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfi
     mid = 0.5 * (bid + ask)
     premium = to_forward_dollars(mid, forward)
     option_type = snapshot["option_type"].to_list()
-    reason = chain.screen(snapshot, t, config)
+    reasons = chain.screen(snapshot, t, config)
     iv = np.full(len(snapshot), np.nan)
-    for i, rejected in enumerate(reason):
-        if rejected is None:
+    for i, screen_reason in enumerate(reasons):
+        if screen_reason is None:  # passed screening, so invert it
             solved = black76.implied_vol(premium[i], forward[i], strike[i], t[i], option_type[i])
-            iv[i], reason[i] = solved.iv, str(solved.reason)
+            iv[i], reasons[i] = solved.iv, solved.reason
     points = pd.DataFrame(
         {
             "strike": strike,
@@ -50,10 +51,10 @@ def build(snapshot: pd.DataFrame, config: chain.FilterConfig = chain.FilterConfi
             "w": iv**2 * t,
             "iv": iv,
             "relative_spread": chain.relative_spread(bid, ask),
-            "reason": reason,
+            "reason": [str(r) for r in reasons],
         }
     )
-    usable = points.query("reason == 'ok'")
+    usable = points.loc[points["reason"] == Reason.OK]
     try:
         interpolated = InterpolatedSurface(usable)
     except ValueError:

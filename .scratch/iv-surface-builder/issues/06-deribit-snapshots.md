@@ -17,3 +17,4 @@
 ## Comments
 
 - **From ticket 01 (snapshot schema decisions):** the schema in the `snapshot` module also has an `underlying` column. Premiums (`bid`/`ask`/`mark`) stay in units of the underlying, exactly as Deribit quotes them, and the pipeline converts them to forward dollars with the shared unit helpers. `mark_iv` is stored as a **decimal**, but Deribit returns it in percent, so the client must divide by 100, and the fetch-seam test should check that. The `.gitignore` entry for `data/snapshots/` is still to do in this ticket.
+- **From the review of tickets 02–04:** `FilterConfig.max_relative_spread` defaults to 0.5. Real Deribit wing quotes are often more than 100% of mid (a 1-tick bid with an ask several ticks higher), so this default may reject most of the wings. Re-check the default against the committed fixtures. Also, a put struck exactly at the forward is dropped with reason `atm_duplicate`.

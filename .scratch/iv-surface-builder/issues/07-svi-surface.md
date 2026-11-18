@@ -17,3 +17,7 @@
 - [ ] The pipeline result includes the SVI parameters for each expiry, the SVI surface, and the SVI surface's arbitrage report.
 - [ ] On the real fixtures, the SVI surface has no more arbitrage violations than the interpolated surface.
 - [ ] The app smiles show market IV, mark_iv, the interpolated curve and the SVI curve, and the arbitrage panel compares the two surfaces.
+
+## Comments
+
+- **From the review of tickets 02–04:** the points table has `relative_spread` = (ask − bid) / mid, not an absolute spread. That suits 1/spread weights, because it is scale-free in total variance. But the synthetic oracle defaults to `relative_spread=0.0`, which makes 1/spread infinite. Either floor the weight or give the SVI oracle tests a non-zero spread. `Surface` now declares `expiries`, so `SVISurface` must expose it too.
