@@ -30,6 +30,12 @@ SYNTHETIC_EXPIRY_DAYS = [3, 7, 14, 30, 60, 90, 180, 365]
 SNAPSHOT_DIR = Path(os.environ.get("IVSURFACE_SNAPSHOT_DIR", "data/snapshots"))
 EXPIRY_COLOURSCALE = "Viridis_r"
 """Expiries share one sequential scale, short = light to long = dark, so no two get the same colour."""
+WING_TRIM = 0.02
+"""The 3D chart leaves out this share of all quotes' strikes on each side: a few far-wing quotes would
+otherwise stretch the σ axis and flatten the rest of the surface."""
+MESH_ROWS_BETWEEN = 38
+"""3D surface rows evenly spaced in sqrt(T), on top of one row per quoted expiry."""
+MESH_POINTS_PER_ROW = 61
 
 st.set_page_config(page_title="IV Surface Builder", layout="wide")
 st.title("Implied volatility surface builder")
@@ -199,26 +205,49 @@ if not views:
     st.warning("Too few quotes survived the filters to build a surface.")
 else:
     main = views[0]  # SVI when it could be fitted, otherwise the interpolated surface
-    k_lo, k_hi = np.quantile(used["k"], [0.02, 0.98])
-    k_grid = np.linspace(k_lo, k_hi, 61)
     all_expiries = np.concatenate([v.surface.expiries for v in views])
     t_grid = np.linspace(all_expiries.min(), all_expiries.max(), 60)
-    kk, tt = np.meshgrid(k_grid, t_grid)
+    k_band = np.quantile(used["k"], [WING_TRIM, 1.0 - WING_TRIM])
+    quoted_range = used.groupby("T")["k"].agg(["min", "max"])  # every quoted expiry, fitted or not
 
-    def quoted_region(surface: Surface) -> NDArray[np.bool_]:
-        """True where (k, T) lies inside the quoted strikes: each expiry's quoted k range, linearly
-        interpolated between expiries. Short expiries are only listed near the money, so outside this
-        region a surface is extrapolating steep short-dated wings into corners with no data."""
-        quoted = used.groupby("T")["k"].agg(["min", "max"]).loc[surface.expiries]
-        k_min = np.interp(tt, surface.expiries, quoted["min"].to_numpy())
-        k_max = np.interp(tt, surface.expiries, quoted["max"].to_numpy())
-        return (kk >= k_min) & (kk <= k_max)
+    def drawn_k_range(t: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """The (lowest, highest) k drawn at each T: the quoted k range, linearly interpolated between
+        quoted expiries and trimmed to k_band. Short expiries are only listed near the money, so beyond
+        this a surface is extrapolating steep short-dated wings into corners with no data."""
+        expiries = quoted_range.index.to_numpy()
+        k_lowest = np.maximum(np.interp(t, expiries, np.asarray(quoted_range["min"], dtype=float)), k_band[0])
+        k_highest = np.minimum(np.interp(t, expiries, np.asarray(quoted_range["max"], dtype=float)), k_band[1])
+        return k_lowest, np.maximum(k_highest, k_lowest)
+
+    def surface_mesh(surface: Surface) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """(k, T) rows for the 3D chart over the surface's own expiry range: one row per quoted expiry,
+        plus rows evenly spaced in sqrt(T), so the short expiries, where the smile changes fastest, get
+        most of them. Each row runs across its own drawn k range, so the edges of the surface follow
+        the quotes instead of a staircase."""
+        first, last = surface.expiries[0], surface.expiries[-1]
+        expiries = quoted_range.index.to_numpy()
+        between = np.linspace(np.sqrt(first), np.sqrt(last), MESH_ROWS_BETWEEN + 2)[1:-1] ** 2
+        rows = np.unique(np.concatenate([expiries[(expiries >= first) & (expiries <= last)], between]))
+        k_lowest, k_highest = drawn_k_range(rows)
+        k = k_lowest[:, None] + (k_highest - k_lowest)[:, None] * np.linspace(0.0, 1.0, MESH_POINTS_PER_ROW)
+        return k, np.broadcast_to(rows[:, None], k.shape)
 
     with surface_tab:
-        z = np.where(quoted_region(main.surface), main.surface.iv(kk, tt), np.nan)
-        fig = go.Figure(go.Surface(x=kk, y=tt * 365, z=z, colorscale="Viridis", colorbar={"title": "σ", "tickformat": ".0%"}))
+        mesh_k, mesh_t = surface_mesh(main.surface)
+        quote_t = used["T"].to_numpy()
+        k_lowest, k_highest = drawn_k_range(quote_t)
+        shown = used[
+            (used["k"] >= k_lowest) & (used["k"] <= k_highest)
+            & (quote_t >= main.surface.expiries[0]) & (quote_t <= main.surface.expiries[-1])
+        ]
+        fig = go.Figure(
+            go.Surface(
+                x=mesh_k, y=mesh_t * 365, z=main.surface.iv(mesh_k, mesh_t), colorscale="Viridis",
+                colorbar={"title": "σ", "tickformat": ".0%"},
+            )
+        )
         fig.add_trace(
-            go.Scatter3d(x=used["k"], y=used["T"] * 365, z=used["iv"], mode="markers", marker={"size": 2, "color": "black"}, name="quotes")
+            go.Scatter3d(x=shown["k"], y=shown["T"] * 365, z=shown["iv"], mode="markers", marker={"size": 2, "color": "black"}, name="quotes")
         )
         fig.update_layout(
             scene={
@@ -234,7 +263,8 @@ else:
         st.plotly_chart(fig, width="stretch")
         st.caption(
             f"The {main.label} surface, with the quotes it was built from, drawn only over the quoted strikes "
-            "at each expiry. Beyond them the surface would be extrapolating."
+            f"at each expiry. Beyond them the surface would be extrapolating. The extreme {WING_TRIM:.0%} of "
+            f"strikes on each side are left out, so {len(used) - len(shown)} quotes are not shown."
         )
 
     with term_tab:
