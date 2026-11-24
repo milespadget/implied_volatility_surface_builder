@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 data/snapshots/
+
+# macOS Finder metadata
+.DS_Store
+# R console history
+.Rhistory
