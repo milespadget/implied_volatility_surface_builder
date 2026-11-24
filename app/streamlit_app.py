@@ -14,6 +14,7 @@ from typing import NamedTuple
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
 from numpy.typing import NDArray
 import streamlit as st
 
@@ -27,6 +28,8 @@ from ivsurface.synthetic import VolFunction, option_chain
 SYNTHETIC = "Synthetic surface"
 SYNTHETIC_EXPIRY_DAYS = [3, 7, 14, 30, 60, 90, 180, 365]
 SNAPSHOT_DIR = Path(os.environ.get("IVSURFACE_SNAPSHOT_DIR", "data/snapshots"))
+EXPIRY_COLOURSCALE = "Viridis_r"
+"""Expiries share one sequential scale, short = light to long = dark, so no two get the same colour."""
 
 st.set_page_config(page_title="IV Surface Builder", layout="wide")
 st.title("Implied volatility surface builder")
@@ -100,6 +103,12 @@ with st.sidebar:
         ),
     )
 
+# The open markers on the smiles: on synthetic chains the snapshot's mark_iv is the true vol the
+# chain was quoted from; on Deribit it is Deribit's own mark IV. (trace name, caption wording)
+reference_iv, reference_iv_caption = (
+    ("true IV", "the true IV of the synthetic surface") if source == SYNTHETIC else ("Deribit mark IV", "Deribit's mark IV")
+)
+
 if source == SYNTHETIC:
     st.caption(
         "Synthetic chain from a known vol surface, quoted with a bid/ask spread and noise, screened, "
@@ -144,15 +153,29 @@ smiles_tab, surface_tab, term_tab, arbitrage_tab = st.tabs(
     ["Smiles by expiry", "3D surface", "ATM term structure", "Arbitrage"]
 )
 
+quoted_expiries = np.unique(used["T"].to_numpy(dtype=float))
+# Start at 0.15: the palest end of the scale is too faint on a white background. At least two
+# samples, so a single expiry still gets a colour from the scale.
+expiry_colour = dict(
+    zip(quoted_expiries, sample_colorscale(EXPIRY_COLOURSCALE, list(np.linspace(0.15, 1.0, max(len(quoted_expiries), 2)))))
+)
+
+
+def expiry_label(t: float) -> str:
+    return f"{t * 365:.1f}d"
+
+
 with smiles_tab:
     fig = go.Figure()
-    for t in np.unique(used["T"].to_numpy(dtype=float)):
+    for t in quoted_expiries:
         ok = used.loc[used["T"] == t]
-        name = f"{t * 365:.1f}d"
-        fig.add_trace(go.Scatter(x=ok["k"], y=ok["iv"], mode="markers", name=name, legendgroup=name))
+        name, colour = expiry_label(t), expiry_colour[t]
+        fig.add_trace(
+            go.Scatter(x=ok["k"], y=ok["iv"], mode="markers", name=name, legendgroup=name, marker={"color": colour})
+        )
         fig.add_trace(
             go.Scatter(
-                x=ok["k"], y=ok["mark_iv"], mode="markers", name=f"{name} Deribit mark IV", legendgroup=name,
+                x=ok["k"], y=ok["mark_iv"], mode="markers", name=f"{name} {reference_iv}", legendgroup=name,
                 showlegend=False, marker={"symbol": "circle-open", "color": "grey"},
             )
         )
@@ -162,13 +185,13 @@ with smiles_tab:
                 fig.add_trace(
                     go.Scatter(
                         x=k, y=view.surface.iv(k, np.full_like(k, t)), mode="lines", name=f"{name} {view.label}",
-                        legendgroup=name, showlegend=False, line=view.line,
+                        legendgroup=name, showlegend=False, line={**view.line, "color": colour},
                     )
                 )
     fig.update_layout(xaxis_title="log-moneyness k = ln(K/F)", yaxis_title="implied vol σ", yaxis_tickformat=".0%")
     st.plotly_chart(fig, width="stretch")
     st.caption(
-        "Filled markers: our IV at the mid. Open grey markers: Deribit's mark IV. "
+        f"Filled markers: our IV at the mid. Open grey markers: {reference_iv_caption}. "
         "Dashed lines: the SVI fit. Thin lines: the interpolated surface."
     )
 
@@ -193,12 +216,19 @@ else:
 
     with surface_tab:
         z = np.where(quoted_region(main.surface), main.surface.iv(kk, tt), np.nan)
-        fig = go.Figure(go.Surface(x=kk, y=tt * 365, z=z, colorscale="Viridis", colorbar={"title": "σ"}))
+        fig = go.Figure(go.Surface(x=kk, y=tt * 365, z=z, colorscale="Viridis", colorbar={"title": "σ", "tickformat": ".0%"}))
         fig.add_trace(
             go.Scatter3d(x=used["k"], y=used["T"] * 365, z=used["iv"], mode="markers", marker={"size": 2, "color": "black"}, name="quotes")
         )
         fig.update_layout(
-            scene={"xaxis_title": "k = ln(K/F)", "yaxis_title": "days to expiry", "zaxis_title": "σ", "zaxis_tickformat": ".0%"},
+            scene={
+                "xaxis": {"title": {"text": "log-moneyness k"}},
+                "yaxis": {"title": {"text": "days to expiry T"}},
+                "zaxis": {"title": {"text": "implied vol σ"}, "tickformat": ".0%"},
+                # From the short-dated, low-strike corner: the skew runs across, the term structure away.
+                "camera": {"eye": {"x": -1.5, "y": -1.5, "z": 0.7}, "center": {"x": 0, "y": 0, "z": -0.1}},
+            },
+            margin={"l": 0, "r": 0, "t": 10, "b": 0},
             height=650,
         )
         st.plotly_chart(fig, width="stretch")
@@ -215,7 +245,7 @@ else:
             )
         if true_vol is not None:
             fig.add_trace(
-                go.Scatter(x=t_grid * 365, y=[true_vol(0.0, t) for t in t_grid], mode="lines", line={"dash": "dot"}, name="true")
+                go.Scatter(x=t_grid * 365, y=[true_vol(0.0, t) for t in t_grid], mode="lines", line={"dash": "dot"}, name="True")
             )
         fig.update_layout(xaxis_title="days to expiry", yaxis_title="ATM implied vol σ(k=0)", yaxis_tickformat=".0%")
         st.plotly_chart(fig, width="stretch")
@@ -226,7 +256,7 @@ else:
             for kind in (ViolationKind.BUTTERFLY, ViolationKind.CALENDAR):
                 next(columns).metric(
                     f"{view.label}: {kind}", view.report.count(kind),
-                    f"{view.report.share(kind):.0%} of points checked", delta_color="off",
+                    f"{view.report.share(kind):.0%} of points checked", delta_color="off", delta_arrow="off",
                 )
         st.caption(
             "Butterfly: Durrleman's g(k) < 0 on a slice means the smile implies a negative density. "
@@ -240,7 +270,12 @@ else:
         report = by_label[inspect].report
         fig = go.Figure()
         for curve in report.butterfly_curves:
-            fig.add_trace(go.Scatter(x=curve.k, y=curve.g, mode="lines", name=f"{curve.t * 365:.1f}d"))
+            fig.add_trace(
+                go.Scatter(
+                    x=curve.k, y=curve.g, mode="lines", name=expiry_label(curve.t),
+                    line={"color": expiry_colour[curve.t]},  # surfaces are built on the quoted expiries
+                )
+            )
         fig.add_hline(y=0, line_color="red", annotation_text="g = 0")
         fig.update_layout(xaxis_title="log-moneyness k = ln(K/F)", yaxis_title=f"Durrleman g(k), {inspect}")
         st.plotly_chart(fig, width="stretch")
